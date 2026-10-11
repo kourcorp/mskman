@@ -1,0 +1,17 @@
+Source: mskman
+Section: games
+Priority: optional
+Maintainer: kourcorp <263039746+kourcorp@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13), libsdl2-dev, pkgconf | pkg-config
+Standards-Version: 4.6.2
+Homepage: https://github.com/kourcorp/mskman
+Rules-Requires-Root: no
+
+Package: mskman
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: maze chase arcade game
+ MSKman is a retro maze chase game for the Linux desktop. Eat every dot,
+ grab the energizers to turn the tables on four ghosts, and collect bonus
+ fruit across two alternating mazes. All graphics and sounds are original
+ and generated at runtime.

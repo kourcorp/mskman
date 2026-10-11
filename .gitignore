@@ -1,0 +1,9 @@
+/mskman
+/mskman-*.tar.gz
+*.o
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/mskman/
+debian/*.substvars
+debian/*.log

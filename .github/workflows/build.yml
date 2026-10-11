@@ -1,0 +1,77 @@
+name: Build packages
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  deb:
+    name: Debian/Ubuntu package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential debhelper libsdl2-dev pkgconf dpkg-dev
+      - name: Build .deb
+        run: |
+          dpkg-buildpackage -us -uc -b
+          mkdir -p dist
+          mv ../mskman_*.deb dist/
+      - name: Inspect package
+        run: |
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb
+      - name: Install and run smoke test
+        run: |
+          sudo apt-get install -y ./dist/*.deb
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy mskman --autoplay --frames 3600
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mskman-deb
+          path: dist/*.deb
+
+  rpm:
+    name: Fedora package
+    runs-on: ubuntu-24.04
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: dnf install -y gcc make tar rpm-build rpmdevtools desktop-file-utils 'pkgconfig(sdl2)'
+      - name: Build .rpm
+        run: |
+          rpmdev-setuptree
+          make dist
+          cp mskman-*.tar.gz ~/rpmbuild/SOURCES/
+          rpmbuild -ba packaging/rpm/mskman.spec
+          mkdir -p dist
+          cp ~/rpmbuild/RPMS/*/mskman-*.rpm ~/rpmbuild/SRPMS/*.src.rpm dist/
+      - name: Install and run smoke test
+        run: |
+          dnf install -y dist/mskman-[0-9]*.x86_64.rpm
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy mskman --autoplay --frames 3600
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mskman-rpm
+          path: dist/*.rpm
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [deb, rpm]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

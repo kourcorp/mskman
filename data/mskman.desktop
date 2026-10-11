@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=MSKman
+GenericName=Maze Chase Game
+Comment=Eat every dot and dodge the ghosts
+Exec=mskman
+Icon=mskman
+Terminal=false
+Categories=Game;ArcadeGame;
+Keywords=arcade;maze;retro;chase;

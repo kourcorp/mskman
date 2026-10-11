@@ -1,0 +1,34 @@
+.TH MSKMAN 6 "October 2026" "mskman" "Games"
+.SH NAME
+mskman \- maze chase arcade game
+.SH SYNOPSIS
+.B mskman
+[\fIoptions\fR]
+.SH DESCRIPTION
+Guide MSK through the maze, eat every dot and avoid the four ghosts.
+Eating an energizer turns the ghosts blue for a short time so they can be
+eaten for bonus points. Fruit appears twice per level.
+.SH CONTROLS
+Arrow keys, WASD or HJKL move. Enter or Space starts a game. P pauses,
+M toggles sound, F11 or Alt+Enter toggles fullscreen, Esc returns to the
+title screen or quits. Game controllers are supported.
+.SH OPTIONS
+.TP
+.BR \-f ", " \-\-fullscreen
+Start in fullscreen.
+.TP
+.BR \-s ", " \-\-scale " " \fIN\fR
+Initial window scale factor (default 3).
+.TP
+.BR \-m ", " \-\-mute
+Start with sound muted.
+.TP
+.B \-\-autoplay
+Let the computer play.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.SH FILES
+.I $XDG_DATA_HOME/mskman/highscore
+(default
+.IR ~/.local/share/mskman/highscore )
