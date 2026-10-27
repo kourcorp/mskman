@@ -7,11 +7,18 @@ mskman \- maze chase arcade game
 .SH DESCRIPTION
 Guide MSK through the maze, eat every dot and avoid the four ghosts.
 Eating an energizer turns the ghosts blue for a short time so they can be
-eaten for bonus points. Fruit appears twice per level.
+eaten for bonus points. Fruit appears twice per level. After the first
+two levels every level is played on a newly generated maze.
+.PP
+Up to four players take turns: a turn ends when the player loses a life.
+Choose the number of players on the title screen with Left/Right or the
+keys 1 to 4.
 .SH CONTROLS
 Arrow keys, WASD or HJKL move. Enter or Space starts a game. P pauses,
 M toggles sound, F11 or Alt+Enter toggles fullscreen, Esc returns to the
-title screen or quits. Game controllers are supported.
+title screen or quits. O on the title screen opens the options, where
+corner assist and the speeds of MSK and the ghosts can be adjusted.
+Game controllers are supported.
 .SH OPTIONS
 .TP
 .BR \-f ", " \-\-fullscreen
@@ -23,12 +30,19 @@ Initial window scale factor (default 3).
 .BR \-m ", " \-\-mute
 Start with sound muted.
 .TP
+.BR \-p ", " \-\-players " " \fIN\fR
+Preselect 1 to 4 players.
+.TP
 .B \-\-autoplay
 Let the computer play.
 .TP
 .BR \-V ", " \-\-version
 Print the version and exit.
 .SH FILES
+.I $XDG_CONFIG_HOME/mskman/settings.conf
+(default
+.IR ~/.config/mskman/settings.conf )
+.br
 .I $XDG_DATA_HOME/mskman/highscore
 (default
 .IR ~/.local/share/mskman/highscore )

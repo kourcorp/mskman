@@ -1,5 +1,5 @@
 Name:           mskman
-Version:        0.1.0
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        Maze chase arcade game
 License:        MIT
@@ -14,8 +14,9 @@ BuildRequires:  desktop-file-utils
 %description
 MSKman is a retro maze chase game for the Linux desktop. Eat every dot,
 grab the energizers to turn the tables on four ghosts, and collect bonus
-fruit across two alternating mazes. All graphics and sounds are original
-and generated at runtime.
+fruit on a new maze every level. Up to four players take turns, and the
+options screen tunes cornering and speeds. All graphics and sounds are
+original and generated at runtime.
 
 %prep
 %autosetup
@@ -40,5 +41,10 @@ make check
 %{_mandir}/man6/%{name}.6*
 
 %changelog
+* Tue Oct 27 2026 kourcorp <263039746+kourcorp@users.noreply.github.com> - 0.2.0-1
+- Turn-based play for up to four players
+- A newly generated maze for every level after the first two
+- Options screen with corner assist and player/ghost speed settings
+
 * Sun Oct 11 2026 kourcorp <263039746+kourcorp@users.noreply.github.com> - 0.1.0-1
 - First playable version

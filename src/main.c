@@ -15,6 +15,7 @@
 
 #include "audio.h"
 #include "font.h"
+#include "mazegen.h"
 #include "mazes.h"
 
 #ifndef VERSION
@@ -80,7 +81,31 @@ typedef struct {
     int anim;
 } Player;
 
-typedef enum { ST_TITLE, ST_READY, ST_PLAY, ST_GHOST_EATEN, ST_DYING, ST_CLEAR, ST_GAME_OVER } GameState;
+typedef enum {
+    ST_TITLE, ST_OPTIONS, ST_READY, ST_PLAY, ST_GHOST_EATEN, ST_DYING, ST_CLEAR, ST_PLAYER_OUT, ST_GAME_OVER
+} GameState;
+
+/* Players take turns like the arcade: a turn ends when the player loses a
+ * life, and each player keeps their own score, lives, level and maze. */
+#define MAX_PLAYERS 4
+typedef struct {
+    int score, lives, level, extra_given, lost_life_this_level;
+    int dots_left, dots_total, dots_eaten, fruits_spawned;
+    char grid[MH][MW];
+} Turn;
+
+/* Control tuning, saved to the user's config directory. */
+typedef struct {
+    int corner_assist; /* pixels a turn may be taken before or after a junction */
+    int player_speed;  /* percent of normal */
+    int ghost_speed;   /* percent of normal */
+} Settings;
+
+static const Settings DEFAULT_SETTINGS = {3, 100, 100};
+#define ASSIST_MAX 4
+#define SPEED_MIN 50
+#define SPEED_MAX 150
+#define SPEED_STEP 10
 
 /* ---- global game state ---- */
 static uint32_t fb[SCR_W * SCR_H];
@@ -104,6 +129,13 @@ static int popup_timer, popup_value, popup_x, popup_y;
 static int first_start;
 static int autoplay;
 
+static Turn turns[MAX_PLAYERS];
+static int num_players = 1, cur_player;
+static uint32_t game_seed;
+static Settings settings;
+static int option_sel;
+static int start_level_no = 1;
+
 static const int MODE_SECONDS[] = {7, 20, 7, 20, 5, 20, 5, -1};
 static const int FRIGHT_SECONDS[] = {6, 5, 4, 3, 2, 5, 2, 2, 1, 5, 2, 1, 1, 3, 1, 1, 0, 1};
 static const int FRUIT_POINTS[] = {100, 200, 500, 700, 1000, 2000, 5000};
@@ -122,8 +154,8 @@ static char tile(int tx, int ty)
 
 static int is_wall(char c) { return c == '#'; }
 
-static int maze_index(void) { return ((level - 1) / 2) % MAZE_COUNT; }
-static int scheme_index(void) { return ((level - 1) / 2) % SCHEME_COUNT; }
+/* The built-in mazes come first, then every level gets a freshly generated one. */
+static int scheme_index(void) { return (level - 1) % SCHEME_COUNT; }
 
 /* Distance (sub-pixels) from coordinate c to the next tile centre in direction sign. */
 static int dist_to_center(int c, int sign)
@@ -317,7 +349,17 @@ static void render_maze_bg(void)
 
 static void load_maze(void)
 {
-    const char *const *half = MAZES[maze_index()];
+    char gen[MH][MW / 2 + 1];
+    const char *half[MH];
+    if (level <= MAZE_COUNT) {
+        for (int y = 0; y < MH; y++)
+            half[y] = MAZES[level - 1][y];
+    } else {
+        /* Same seed for every player, so all of them face the same boards. */
+        mazegen_build(game_seed + (uint32_t)level * 7919u, gen);
+        for (int y = 0; y < MH; y++)
+            half[y] = gen[y];
+    }
     dots_total = 0;
     for (int y = 0; y < MH; y++)
         for (int x = 0; x < MW / 2; x++) {
@@ -335,17 +377,33 @@ static void load_maze(void)
     render_maze_bg();
 }
 
-/* ---- high score persistence ---- */
-static void hiscore_path(char *buf, size_t n)
+/* ---- high score and settings persistence ---- */
+/* $XDG_<var>/mskman, falling back to ~/<fallback>/mskman. */
+static void user_dir(char *buf, size_t n, const char *var, const char *fallback)
 {
-    const char *xdg = getenv("XDG_DATA_HOME");
+    const char *xdg = getenv(var);
     const char *home = getenv("HOME");
     if (xdg && *xdg)
         snprintf(buf, n, "%s/mskman", xdg);
     else if (home && *home)
-        snprintf(buf, n, "%s/.local/share/mskman", home);
+        snprintf(buf, n, "%s/%s/mskman", home, fallback);
     else
         buf[0] = 0;
+}
+
+static void hiscore_path(char *buf, size_t n) { user_dir(buf, n, "XDG_DATA_HOME", ".local/share"); }
+static void config_path(char *buf, size_t n) { user_dir(buf, n, "XDG_CONFIG_HOME", ".config"); }
+
+/* Creates the directory chain (e.g. ~/.local/share/mskman). */
+static int make_dirs(char *dir)
+{
+    for (char *p = dir + 1; *p; p++)
+        if (*p == '/') {
+            *p = 0;
+            mkdir(dir, 0755);
+            *p = '/';
+        }
+    return mkdir(dir, 0755) == 0 || errno == EEXIST;
 }
 
 static void load_hiscore(void)
@@ -367,16 +425,7 @@ static void save_hiscore(void)
 {
     char dir[1024], path[1100];
     hiscore_path(dir, sizeof dir);
-    if (!dir[0] || autoplay)
-        return;
-    /* Create the directory chain (e.g. ~/.local/share/mskman). */
-    for (char *p = dir + 1; *p; p++)
-        if (*p == '/') {
-            *p = 0;
-            mkdir(dir, 0755);
-            *p = '/';
-        }
-    if (mkdir(dir, 0755) != 0 && errno != EEXIST)
+    if (!dir[0] || autoplay || !make_dirs(dir))
         return;
     snprintf(path, sizeof path, "%s/highscore", dir);
     FILE *f = fopen(path, "w");
@@ -386,13 +435,68 @@ static void save_hiscore(void)
     fclose(f);
 }
 
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+static void load_settings(void)
+{
+    char dir[1024], path[1100], line[128];
+    settings = DEFAULT_SETTINGS;
+    config_path(dir, sizeof dir);
+    if (!dir[0])
+        return;
+    snprintf(path, sizeof path, "%s/settings.conf", dir);
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return;
+    while (fgets(line, sizeof line, f)) {
+        char key[64];
+        int v;
+        if (sscanf(line, " %63[a-z_] = %d", key, &v) != 2)
+            continue;
+        if (!strcmp(key, "corner_assist"))
+            settings.corner_assist = clampi(v, 0, ASSIST_MAX);
+        else if (!strcmp(key, "player_speed"))
+            settings.player_speed = clampi(v, SPEED_MIN, SPEED_MAX);
+        else if (!strcmp(key, "ghost_speed"))
+            settings.ghost_speed = clampi(v, SPEED_MIN, SPEED_MAX);
+    }
+    fclose(f);
+}
+
+static void save_settings(void)
+{
+    char dir[1024], path[1100];
+    config_path(dir, sizeof dir);
+    if (!dir[0] || autoplay || !make_dirs(dir))
+        return;
+    snprintf(path, sizeof path, "%s/settings.conf", dir);
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return;
+    fprintf(f, "# MSKman settings (also editable from the Options screen)\n"
+               "# corner_assist: pixels a turn is accepted before/after a junction (0-%d)\n"
+               "corner_assist = %d\n"
+               "# speeds in percent of normal (%d-%d)\n"
+               "player_speed = %d\n"
+               "ghost_speed = %d\n",
+            ASSIST_MAX, settings.corner_assist, SPEED_MIN, SPEED_MAX, settings.player_speed,
+            settings.ghost_speed);
+    fclose(f);
+}
+
 /* ---- speeds (sub-pixels per frame; 20 = full speed) ---- */
 static int tier(void) { return level == 1 ? 0 : level < 5 ? 1 : 2; }
+
+static int scale_speed(int s, int percent)
+{
+    s = (s * percent + 50) / 100;
+    return s < 1 ? 1 : s;
+}
 
 static int player_speed(void)
 {
     static const int normal[] = {16, 18, 20}, fright[] = {18, 19, 20};
-    return fright_timer > 0 ? fright[tier()] : normal[tier()];
+    return scale_speed(fright_timer > 0 ? fright[tier()] : normal[tier()], settings.player_speed);
 }
 
 static int in_tunnel(const Ghost *g)
@@ -414,17 +518,30 @@ static int ghost_speed(const Ghost *g)
     default:
         break;
     }
-    if (in_tunnel(g))
-        return tunnel[tier()];
-    if (g->fright)
-        return fright[tier()];
-    int s = normal[tier()];
-    if (g == &gh[0] && dots_left <= 20 + 10 * tier())
-        s += dots_left <= 10 + 5 * tier() ? 3 : 1;
-    return s;
+    int s;
+    if (in_tunnel(g)) {
+        s = tunnel[tier()];
+    } else if (g->fright) {
+        s = fright[tier()];
+    } else {
+        s = normal[tier()];
+        if (g == &gh[0] && dots_left <= 20 + 10 * tier())
+            s += dots_left <= 10 + 5 * tier() ? 3 : 1;
+    }
+    return scale_speed(s, settings.ghost_speed);
 }
 
 /* ---- movement ---- */
+/* Scripted straight-line move toward a target; returns 1 on arrival. */
+static int approach(int *v, int target, int speed)
+{
+    if (*v < target)
+        *v = *v + speed > target ? target : *v + speed;
+    else if (*v > target)
+        *v = *v - speed < target ? target : *v - speed;
+    return *v == target;
+}
+
 typedef int (*CenterFn)(void *self);
 
 /* Move an actor `speed` sub-pixels, calling fn at every tile centre reached.
@@ -469,6 +586,30 @@ static int player_center(void *self)
         pl.dir = pl.want;
     pl.moving = player_open(tx, ty, pl.dir);
     return pl.moving;
+}
+
+/* Corner assist: a turn pressed a few pixels before or after a junction is
+ * taken at once; centre_player() then slides the player onto the new lane. */
+static void corner_assist(void)
+{
+    int d = pl.want;
+    if (settings.corner_assist <= 0 || d == NODIR || d == pl.dir || d == OPP(pl.dir) || autoplay)
+        return;
+    int horiz = pl.dir == LEFT || pl.dir == RIGHT;
+    int c = horiz ? pl.x : pl.y;
+    int off = c - (c / TU * TU + TU / 2);
+    if (off == 0 || abs(off) > settings.corner_assist * SUB)
+        return;
+    if (player_open(pl.x / TU, pl.y / TU, d)) {
+        pl.dir = d;
+        pl.moving = 1;
+    }
+}
+
+static void centre_player(int speed)
+{
+    int *c = pl.dir == LEFT || pl.dir == RIGHT ? &pl.y : &pl.x;
+    approach(c, *c / TU * TU + TU / 2, speed);
 }
 
 static void ghost_target(const Ghost *g, int *tx, int *ty)
@@ -548,16 +689,6 @@ static int ghost_center(void *self)
     }
     g->dir = best;
     return 1;
-}
-
-/* Scripted straight-line move toward a target; returns 1 on arrival. */
-static int approach(int *v, int target, int speed)
-{
-    if (*v < target)
-        *v = *v + speed > target ? target : *v + speed;
-    else if (*v > target)
-        *v = *v - speed < target ? target : *v - speed;
-    return *v == target;
 }
 
 static void update_ghost(Ghost *g)
@@ -674,16 +805,80 @@ static void start_level(void)
     }
 }
 
+/* Copy the active player's progress to and from their turn record. */
+static void save_turn(int p)
+{
+    Turn *t = &turns[p];
+    t->score = score;
+    t->lives = lives;
+    t->level = level;
+    t->extra_given = extra_given;
+    t->lost_life_this_level = lost_life_this_level;
+    t->dots_left = dots_left;
+    t->dots_total = dots_total;
+    t->dots_eaten = dots_eaten;
+    t->fruits_spawned = fruits_spawned;
+    memcpy(t->grid, grid, sizeof grid);
+}
+
+static void load_turn(int p)
+{
+    const Turn *t = &turns[p];
+    cur_player = p;
+    score = t->score;
+    lives = t->lives;
+    level = t->level;
+    extra_given = t->extra_given;
+    lost_life_this_level = t->lost_life_this_level;
+    dots_left = t->dots_left;
+    dots_total = t->dots_total;
+    dots_eaten = t->dots_eaten;
+    fruits_spawned = t->fruits_spawned;
+    memcpy(grid, t->grid, sizeof grid);
+    render_maze_bg();
+}
+
 static void start_game(void)
 {
-    score = 0;
-    lives = 3;
-    level = 1;
-    extra_given = 0;
-    first_start = 1;
+    game_seed = (uint32_t)rand() ^ ((uint32_t)rand() << 16);
     paused = 0;
     audio_stop_all();
+    for (int p = num_players - 1; p >= 0; p--) {
+        score = 0;
+        lives = 3;
+        level = start_level_no;
+        extra_given = 0;
+        lost_life_this_level = 0;
+        fruits_spawned = 0;
+        load_maze();
+        save_turn(p);
+    }
+    cur_player = 0;
+    first_start = 1;
     start_level();
+}
+
+/* After a lost life: pick whose turn is next, or end the game. */
+static void next_turn(void)
+{
+    save_turn(cur_player);
+    int next = -1;
+    for (int i = 1; i <= num_players; i++) {
+        int p = (cur_player + i) % num_players;
+        if (turns[p].lives > 0) {
+            next = p;
+            break;
+        }
+    }
+    if (next < 0) {
+        save_hiscore();
+        set_state(ST_GAME_OVER, 3 * FPS);
+        return;
+    }
+    if (next != cur_player)
+        load_turn(next);
+    reset_actors();
+    set_state(ST_READY, (num_players > 1 ? 3 : 2) * FPS);
 }
 
 static void add_score(int pts)
@@ -815,7 +1010,10 @@ static void update_play(void)
     if (pl.stall > 0) {
         pl.stall--;
     } else {
-        advance(&pl.x, &pl.y, &pl.dir, player_speed(), player_center, NULL);
+        int sp = player_speed();
+        corner_assist();
+        advance(&pl.x, &pl.y, &pl.dir, sp, player_center, NULL);
+        centre_player(sp);
         if (pl.moving)
             pl.anim++;
     }
@@ -872,6 +1070,8 @@ static void update(void)
         if (autoplay)
             start_game();
         break;
+    case ST_OPTIONS:
+        break;
     case ST_READY:
         if (--state_timer <= 0)
             set_state(ST_PLAY, 0);
@@ -890,15 +1090,16 @@ static void update(void)
             audio_play(SND_DEATH);
         if (--state_timer <= 0) {
             lives--;
-            if (lives <= 0) {
-                save_hiscore();
-                set_state(ST_GAME_OVER, 3 * FPS);
-            } else {
-                lost_life_this_level = 1;
-                reset_actors();
-                set_state(ST_READY, 2 * FPS);
-            }
+            lost_life_this_level = 1;
+            if (lives <= 0 && num_players > 1)
+                set_state(ST_PLAYER_OUT, 2 * FPS);
+            else
+                next_turn();
         }
+        break;
+    case ST_PLAYER_OUT:
+        if (--state_timer <= 0)
+            next_turn();
         break;
     case ST_CLEAR:
         if (--state_timer <= 0) {
@@ -1001,11 +1202,15 @@ static void draw_popup(int value, int x, int y, uint32_t c)
     draw_text((int)px - w / 2, (int)py - 3, buf, c, 1);
 }
 
+static int in_game(void) { return state != ST_TITLE && state != ST_OPTIONS; }
+
 static void draw_hud(void)
 {
     char buf[32];
-    if (state == ST_TITLE || (frame / 16) % 2 || state != ST_PLAY)
-        text_at(3, 0, "1UP", C_WHITE);
+    if (!in_game() || (frame / 16) % 2 || state != ST_PLAY) {
+        snprintf(buf, sizeof buf, "%dUP", in_game() ? cur_player + 1 : 1);
+        text_at(3, 0, buf, C_WHITE);
+    }
     text_at(9, 0, "HIGH SCORE", C_WHITE);
     snprintf(buf, sizeof buf, "%7d", score);
     if (score == 0)
@@ -1016,8 +1221,14 @@ static void draw_hud(void)
         text_at(10, 1, buf, C_WHITE);
     }
 
-    if (state == ST_TITLE)
+    if (!in_game())
         return;
+    /* The other players' scores, top right; dimmed once they are out. */
+    for (int i = 1, row = 0; i < num_players; i++, row++) {
+        int p = (cur_player + i) % num_players;
+        snprintf(buf, sizeof buf, "%dUP%6d", p + 1, turns[p].score);
+        draw_text(SCR_W - 9 * 6, row * TILE, buf, turns[p].lives > 0 ? RGB(170, 170, 170) : RGB(110, 40, 40), 1);
+    }
     int reserve = lives - 1;
     for (int i = 0; i < reserve && i < 5; i++)
         draw_player_at(20.0f + i * 16.0f, SCR_H - 12.0f, LEFT, 50.0f, 1);
@@ -1043,11 +1254,87 @@ static void draw_title(void)
     draw_player_at(52.0f, 196.0f, RIGHT, open[(frame / 3) % 4], 1);
     draw_text(72, 193, "STARRING MSK", C_YELLOW, 1);
 
+    char buf[32];
+    snprintf(buf, sizeof buf, "< %d PLAYER%s >", num_players, num_players > 1 ? "S" : "");
+    text_center(212, buf, C_YELLOW, 1);
     if ((frame / 30) % 2 == 0)
-        text_center(224, "PRESS ENTER TO PLAY", C_WHITE, 1);
-    text_center(244, "ARROWS/WASD MOVE  P PAUSE", C_CYAN, 1);
-    text_center(256, "M MUTE  F11 FULLSCREEN", C_CYAN, 1);
-    text_center(274, "ESC QUITS", C_CYAN, 1);
+        text_center(226, "PRESS ENTER TO PLAY", C_WHITE, 1);
+    text_center(242, "LEFT/RIGHT PLAYERS  O OPTIONS", C_CYAN, 1);
+    text_center(254, "ARROWS/WASD MOVE  P PAUSE", C_CYAN, 1);
+    text_center(266, "M MUTE  F11 FULLSCREEN", C_CYAN, 1);
+    text_center(278, "ESC QUITS", C_CYAN, 1);
+}
+
+/* ---- options screen ---- */
+enum { OPT_ASSIST, OPT_PLAYER_SPEED, OPT_GHOST_SPEED, OPT_DEFAULTS, OPT_BACK, OPT_COUNT };
+
+static void option_change(int delta)
+{
+    switch (option_sel) {
+    case OPT_ASSIST:
+        settings.corner_assist = clampi(settings.corner_assist + delta, 0, ASSIST_MAX);
+        break;
+    case OPT_PLAYER_SPEED:
+        settings.player_speed = clampi(settings.player_speed + delta * SPEED_STEP, SPEED_MIN, SPEED_MAX);
+        break;
+    case OPT_GHOST_SPEED:
+        settings.ghost_speed = clampi(settings.ghost_speed + delta * SPEED_STEP, SPEED_MIN, SPEED_MAX);
+        break;
+    }
+}
+
+static void close_options(void)
+{
+    save_settings();
+    set_state(ST_TITLE, 0);
+}
+
+static void option_activate(void)
+{
+    if (option_sel == OPT_DEFAULTS)
+        settings = DEFAULT_SETTINGS;
+    else if (option_sel == OPT_BACK)
+        close_options();
+}
+
+static void draw_options(void)
+{
+    static const char *const help[OPT_COUNT] = {
+        "TURN THIS MANY PIXELS EARLY",
+        "HOW FAST MSK MOVES",
+        "HOW FAST THE GHOSTS MOVE",
+        "PRESS ENTER TO RESET",
+        "PRESS ENTER OR ESC",
+    };
+    static const char *const help2[OPT_COUNT] = {
+        "OR LATE AT A CORNER", "", "", "", "TO SAVE AND RETURN",
+    };
+    char val[OPT_COUNT][16];
+    snprintf(val[OPT_ASSIST], 16, settings.corner_assist ? "%d PX" : "OFF", settings.corner_assist);
+    snprintf(val[OPT_PLAYER_SPEED], 16, "%d%%", settings.player_speed);
+    snprintf(val[OPT_GHOST_SPEED], 16, "%d%%", settings.ghost_speed);
+    val[OPT_DEFAULTS][0] = val[OPT_BACK][0] = 0;
+    static const char *const label[OPT_COUNT] = {
+        "CORNER ASSIST", "MSK SPEED", "GHOST SPEED", "DEFAULTS", "BACK",
+    };
+
+    text_center(40, "OPTIONS", C_YELLOW, 2);
+    for (int i = 0; i < OPT_COUNT; i++) {
+        int y = 80 + i * 20 + (i >= OPT_DEFAULTS ? 10 : 0);
+        uint32_t c = i == option_sel ? C_YELLOW : C_WHITE;
+        if (i == option_sel)
+            draw_text(20, y, ">", c, 1);
+        draw_text(32, y, label[i], c, 1);
+        if (val[i][0]) {
+            char buf[96];
+            snprintf(buf, sizeof buf, "< %s >", val[i]);
+            draw_text(SCR_W - 20 - ((int)strlen(buf) * 6 - 1), y, buf, c, 1);
+        }
+    }
+    text_center(206, help[option_sel], C_PINK, 1);
+    text_center(218, help2[option_sel], C_PINK, 1);
+    text_center(254, "UP/DOWN CHOOSE", C_CYAN, 1);
+    text_center(266, "LEFT/RIGHT CHANGE", C_CYAN, 1);
 }
 
 static void render(void)
@@ -1057,6 +1344,10 @@ static void render(void)
     draw_hud();
     if (state == ST_TITLE) {
         draw_title();
+        return;
+    }
+    if (state == ST_OPTIONS) {
+        draw_options();
         return;
     }
     draw_maze();
@@ -1072,17 +1363,22 @@ static void render(void)
         draw_ghosts();
     if (state == ST_GHOST_EATEN)
         draw_popup(popup_value, popup_x, popup_y, C_CYAN);
-    else if (state != ST_GAME_OVER)
+    else if (state != ST_GAME_OVER && state != ST_PLAYER_OUT)
         draw_player();
 
     if (state == ST_READY)
         text_at(11, 3 + 17, "READY!", C_YELLOW);
-    if (state == ST_GAME_OVER)
+    if (state == ST_GAME_OVER || state == ST_PLAYER_OUT)
         text_at(9, 3 + 17, "GAME  OVER", C_RED);
-    if (state == ST_READY && level > 1 && state_timer > FPS) {
+    if ((state == ST_READY && state_timer > FPS) || state == ST_PLAYER_OUT) {
         char buf[24];
-        snprintf(buf, sizeof buf, "LEVEL %d", level);
-        text_at(10, 3 + 11, buf, C_WHITE);
+        if (num_players > 1)
+            snprintf(buf, sizeof buf, "PLAYER %d", cur_player + 1);
+        else if (level > 1)
+            snprintf(buf, sizeof buf, "LEVEL %d", level);
+        else
+            buf[0] = 0;
+        text_center((3 + 11) * TILE, buf, num_players > 1 ? C_CYAN : C_WHITE, 1);
     }
     if (paused) {
         fill_rect(70, 132, 84, 20, C_BLACK);
@@ -1123,23 +1419,127 @@ static void press_start(void)
 {
     if (state == ST_TITLE)
         start_game();
+    else if (state == ST_OPTIONS)
+        option_activate();
 }
 
 static void press_dir(int d)
 {
-    if (d != NODIR)
+    if (d == NODIR)
+        return;
+    if (state == ST_TITLE) {
+        if (d == LEFT || d == RIGHT)
+            num_players = clampi(num_players + (d == LEFT ? -1 : 1), 1, MAX_PLAYERS);
+    } else if (state == ST_OPTIONS) {
+        if (d == UP || d == DOWN)
+            option_sel = imod(option_sel + (d == UP ? -1 : 1), OPT_COUNT);
+        else
+            option_change(d == LEFT ? -1 : 1);
+    } else {
         pl.want = d;
+    }
+}
+
+static void open_options(void)
+{
+    if (state == ST_TITLE) {
+        option_sel = 0;
+        set_state(ST_OPTIONS, 0);
+    }
+}
+
+/* Esc (or B on a pad): back out one screen, quitting from the title. */
+static int press_back(void)
+{
+    if (state == ST_TITLE)
+        return 0;
+    if (state == ST_OPTIONS) {
+        close_options();
+        return 1;
+    }
+    save_hiscore();
+    audio_stop_all();
+    paused = 0;
+    set_state(ST_TITLE, 0);
+    return 1;
 }
 
 static void toggle_pause(void)
 {
-    if (state == ST_TITLE || state == ST_GAME_OVER)
+    if (!in_game() || state == ST_GAME_OVER)
         return;
     paused = !paused;
     if (paused) {
         audio_loop(SND_SIREN, 0);
         audio_loop(SND_POWER, 0);
     }
+}
+
+/* ---- maze self-test ---- */
+/* Checks the loaded maze: symmetric, no dead ends, every open tile reachable
+ * from the start. Returns a description of the first problem, or NULL. */
+static const char *maze_problem(void)
+{
+    static char msg[96];
+    int seen[MH][MW] = {{0}}, stack[MH * MW], n = 0, open = 0, reached = 0;
+    for (int y = 0; y < MH; y++)
+        for (int x = 0; x < MW; x++) {
+            if (grid[y][x] != grid[y][MW - 1 - x])
+                return "not symmetric";
+            if (is_wall(grid[y][x]) || grid[y][x] == '-' || (y >= 13 && y <= 15 && x >= 11 && x <= 16))
+                continue;
+            open++;
+            int exits = 0;
+            for (int d = 0; d < 4; d++)
+                exits += player_open(x, y, d);
+            if (exits < 2) {
+                snprintf(msg, sizeof msg, "dead end at %d,%d", x, y);
+                return msg;
+            }
+        }
+    seen[23][13] = 1;
+    stack[n++] = 23 * MW + 13;
+    while (n > 0) {
+        int y = stack[--n] / MW, x = stack[n] % MW;
+        reached++;
+        for (int d = 0; d < 4; d++) {
+            int nx = imod(x + DX[d], MW), ny = y + DY[d];
+            if (player_open(x, y, d) && !seen[ny][nx]) {
+                seen[ny][nx] = 1;
+                stack[n++] = ny * MW + nx;
+            }
+        }
+    }
+    if (reached != open) {
+        snprintf(msg, sizeof msg, "%d of %d open tiles unreachable", open - reached, open);
+        return msg;
+    }
+    if (tile(13, 11) != ' ' || tile(13, 17) != ' ' || tile(13, 12) != '-')
+        return "ghost house surroundings changed";
+    if (dots_total < 150)
+        return "too few dots";
+    return NULL;
+}
+
+static int check_mazes(int count)
+{
+    int bad = 0, min_dots = 1 << 30, max_dots = 0;
+    for (int i = 0; i < MAZE_COUNT + count; i++) {
+        game_seed = (uint32_t)(i / 4) * 104729u;
+        level = i < MAZE_COUNT ? i + 1 : MAZE_COUNT + 1 + i % 4;
+        load_maze();
+        const char *why = maze_problem();
+        if (why) {
+            printf("maze %d (seed %u, level %d): %s\n", i, game_seed, level, why);
+            bad++;
+        }
+        if (dots_total < min_dots)
+            min_dots = dots_total;
+        if (dots_total > max_dots)
+            max_dots = dots_total;
+    }
+    printf("mskman: checked %d mazes, %d bad, %d-%d dots\n", MAZE_COUNT + count, bad, min_dots, max_dots);
+    return bad ? 1 : 0;
 }
 
 static void usage(const char *argv0)
@@ -1150,7 +1550,10 @@ static void usage(const char *argv0)
            "  -m, --mute         start with sound muted\n"
            "  -V, --version      print version and exit\n"
            "  -h, --help         show this help\n"
+           "  -p, --players N    preselect 1-4 players (they take turns)\n"
            "      --autoplay     let the computer play (demo / smoke test)\n"
+           "      --level N      start at level N (for testing)\n"
+           "      --check-mazes N  verify the built-in and N generated mazes, then exit\n"
            "      --frames N     quit after N frames (for testing)\n"
            "      --screenshot F save the last frame to F as BMP\n",
            argv0);
@@ -1172,6 +1575,12 @@ int main(int argc, char **argv)
                 scale = 3;
         } else if (!strcmp(a, "-m") || !strcmp(a, "--mute")) {
             sound = 0;
+        } else if ((!strcmp(a, "-p") || !strcmp(a, "--players")) && i + 1 < argc) {
+            num_players = clampi(atoi(argv[++i]), 1, MAX_PLAYERS);
+        } else if (!strcmp(a, "--level") && i + 1 < argc) {
+            start_level_no = clampi(atoi(argv[++i]), 1, 255);
+        } else if (!strcmp(a, "--check-mazes") && i + 1 < argc) {
+            return check_mazes(atoi(argv[++i]));
         } else if (!strcmp(a, "--autoplay")) {
             autoplay = 1;
         } else if (!strcmp(a, "--frames") && i + 1 < argc) {
@@ -1231,6 +1640,7 @@ int main(int argc, char **argv)
     audio_init(sound);
     srand((unsigned)SDL_GetTicks() ^ (unsigned)SDL_GetPerformanceCounter());
     load_hiscore();
+    load_settings();
     level = 1;
     load_maze();
     reset_actors();
@@ -1253,15 +1663,12 @@ int main(int argc, char **argv)
             case SDL_KEYDOWN: {
                 SDL_Keycode k = ev.key.keysym.sym;
                 if (k == SDLK_ESCAPE) {
-                    if (state == ST_TITLE) {
+                    if (!press_back())
                         running = 0;
-                    } else {
-                        if (score >= hiscore)
-                            save_hiscore();
-                        audio_stop_all();
-                        paused = 0;
-                        set_state(ST_TITLE, 0);
-                    }
+                } else if (state == ST_TITLE && k >= SDLK_1 && k < SDLK_1 + MAX_PLAYERS) {
+                    num_players = (int)(k - SDLK_1) + 1;
+                } else if (state == ST_TITLE && k == SDLK_o) {
+                    open_options();
                 } else if (k == SDLK_RETURN && (ev.key.keysym.mod & KMOD_ALT)) {
                     toggle_fullscreen(win);
                 } else if (k == SDLK_F11) {
@@ -1289,18 +1696,31 @@ int main(int argc, char **argv)
                 break;
             case SDL_CONTROLLERBUTTONDOWN:
                 if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_START)
-                    state == ST_TITLE ? press_start() : toggle_pause();
+                    in_game() ? toggle_pause() : press_start();
                 else if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_A)
                     press_start();
+                else if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_B)
+                    press_back();
+                else if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_Y)
+                    open_options();
                 else
                     press_dir(button_dir(ev.cbutton.button));
                 break;
-            case SDL_CONTROLLERAXISMOTION:
-                if (ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX && abs(ev.caxis.value) > 16000)
-                    press_dir(ev.caxis.value < 0 ? LEFT : RIGHT);
-                else if (ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY && abs(ev.caxis.value) > 16000)
-                    press_dir(ev.caxis.value < 0 ? UP : DOWN);
+            case SDL_CONTROLLERAXISMOTION: {
+                /* Act once per push so menus don't race through their choices. */
+                static int held[2];
+                int ax = ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX ? 0
+                         : ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY ? 1 : -1;
+                if (ax < 0)
+                    break;
+                int dir = abs(ev.caxis.value) <= 16000 ? NODIR
+                          : ax == 0 ? (ev.caxis.value < 0 ? LEFT : RIGHT)
+                                    : (ev.caxis.value < 0 ? UP : DOWN);
+                if (dir != held[ax] - 1)
+                    press_dir(dir);
+                held[ax] = dir + 1;
                 break;
+            }
             case SDL_WINDOWEVENT:
                 if (ev.window.event == SDL_WINDOWEVENT_FOCUS_LOST && !paused &&
                     (state == ST_PLAY || state == ST_READY) && !autoplay)
@@ -1336,8 +1756,14 @@ int main(int argc, char **argv)
                                                                 SDL_PIXELFORMAT_ARGB8888), shot) != 0)
         fprintf(stderr, "mskman: screenshot failed: %s\n", SDL_GetError());
 
-    if (max_frames >= 0)
-        printf("mskman: ran %ld frames, level %d, score %d, lives %d\n", frames_run, level, score, lives);
+    if (max_frames >= 0) {
+        printf("mskman: ran %ld frames, player %d, level %d, score %d, lives %d\n", frames_run,
+               cur_player + 1, level, score, lives);
+        for (int p = 0; p < num_players && num_players > 1; p++)
+            printf("mskman:   player %d score %d lives %d level %d\n", p + 1,
+                   p == cur_player ? score : turns[p].score, p == cur_player ? lives : turns[p].lives,
+                   p == cur_player ? level : turns[p].level);
+    }
     if (score >= hiscore && score > 0)
         save_hiscore();
     if (pad)

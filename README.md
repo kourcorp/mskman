@@ -3,7 +3,13 @@
 A maze chase arcade game for the Linux desktop, written in C with SDL2.
 Guide MSK through the maze, eat every dot, and dodge four ghosts that each
 hunt in their own way. Energizers turn the ghosts blue so you can eat them,
-and bonus fruit shows up twice per level.
+and bonus fruit shows up twice per level. The first two levels use
+hand-made mazes; after that every level is played on a freshly generated
+maze (symmetric, no dead ends, fully connected).
+
+Up to four players can play, taking turns like the arcade: a turn ends
+when the player loses a life, and each player keeps their own score,
+lives, level and maze.
 
 All mazes, sprites and sounds are original: the graphics are drawn and the
 audio is synthesized at runtime, so the game ships no asset files.
@@ -14,12 +20,15 @@ audio is synthesized at runtime, so the game ships no asset files.
 | --- | --- |
 | Arrow keys, WASD, HJKL | Move |
 | Enter / Space | Start a game |
+| Left / Right or 1-4 (title screen) | Choose the number of players |
+| O (title screen) | Options |
 | P | Pause |
 | M | Mute / unmute |
 | F11 or Alt+Enter | Toggle fullscreen |
 | Esc | Back to the title screen (quits from the title) |
 
-Game controllers work too (D-pad or left stick, Start to pause).
+Game controllers work too (D-pad or left stick, Start to pause, Y for
+options, B to go back).
 The window can be resized freely; the picture scales to fit.
 
 ## Install a package
@@ -59,10 +68,23 @@ rpmbuild -ba packaging/rpm/mskman.spec
 CI builds both packages on every push. Pushing a tag such as `v0.1.0`
 publishes them as a GitHub release.
 
-## Options
+## Control tuning
+
+Press **O** on the title screen to open the options:
+
+| Setting | What it does | Default |
+| --- | --- | --- |
+| Corner assist | Accepts a turn up to this many pixels before or after a junction, then slides MSK onto the new lane (0 = off, 4 = max) | 3 px |
+| MSK speed | Player speed, 50-150% of normal | 100% |
+| Ghost speed | Ghost speed, 50-150% of normal | 100% |
+
+Settings are saved to `~/.config/mskman/settings.conf` (or
+`$XDG_CONFIG_HOME/mskman/settings.conf`), which can also be edited by hand.
+
+## Command line
 
 ```
-mskman [--fullscreen] [--scale N] [--mute] [--version] [--help]
+mskman [--fullscreen] [--scale N] [--mute] [--players N] [--version] [--help]
 ```
 
 The high score is kept in `~/.local/share/mskman/highscore`.
