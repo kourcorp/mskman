@@ -13,5 +13,6 @@ Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: maze chase arcade game
  MSKman is a retro maze chase game for the Linux desktop. Eat every dot,
  grab the energizers to turn the tables on four ghosts, and collect bonus
- fruit across two alternating mazes. All graphics and sounds are original
- and generated at runtime.
+ fruit on a new maze every level. Up to four players take turns, and the
+ options screen tunes cornering and speeds. All graphics and sounds are
+ original and generated at runtime.

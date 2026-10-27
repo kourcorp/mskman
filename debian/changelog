@@ -1,3 +1,11 @@
+mskman (0.2.0) unstable; urgency=medium
+
+  * Turn-based play for up to four players.
+  * A newly generated maze for every level after the first two.
+  * Options screen with corner assist and player/ghost speed settings.
+
+ -- kourcorp <263039746+kourcorp@users.noreply.github.com>  Tue, 27 Oct 2026 12:00:00 +0000
+
 mskman (0.1.0) unstable; urgency=medium
 
   * First playable version: two original mazes, four ghosts with distinct
